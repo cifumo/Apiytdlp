@@ -1,15 +1,32 @@
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI, Request, Query, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 import os
-import subprocess
-from datetime import datetime, timedelta
 import asyncio
-from urllib.parse import quote, unquote
-import json
+from datetime import datetime
+from urllib.parse import quote
 import io
+import logging
 
-app = FastAPI(title="YouTube dan Spotify Downloader API", description="API untuk mengunduh video dan audio dari YouTube dan Spotify.", version="1.0.0")
+# Konfigurasi Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="YouTube dan Spotify Downloader API",
+    description="API untuk mengunduh video dan audio dari YouTube dan Spotify.",
+    version="1.0.0"
+)
+
+# Konfigurasi CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 OUTPUT_DIR = "output"
 SPOTIFY_OUTPUT_DIR = "spotify_output"
@@ -22,21 +39,22 @@ async def delete_file_after_delay(file_path: str, delay: int = 600):
     await asyncio.sleep(delay)
     try:
         os.remove(file_path)
-        print(f"File {file_path} telah dihapus setelah {delay} detik.")
+        logger.info(f"File {file_path} telah dihapus setelah {delay} detik.")
+    except FileNotFoundError:
+        logger.warning(f"File {file_path} tidak ditemukan, tidak dapat dihapus.")
     except Exception as e:
-        print(f"Gagal menghapus file {file_path}: {e}")
+        logger.error(f"Gagal menghapus file {file_path}: {e}")
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    start_time = datetime.now()
     response = await call_next(request)
-    log_message = (
-        f"IP: {request.client.host}, "
-        f"Time: {datetime.now()}, "
-        f"URL: {request.url}, "
-        f"Status: {response.status_code}, "
-        f"Method: {request.method}"
+    process_time = (datetime.now() - start_time).microseconds / 1000
+    logger.info(
+        f"IP: {request.client.host}, Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, "
+        f"Method: {request.method}, URL: {request.url}, "
+        f"Status: {response.status_code}, Process Time: {process_time:.3f} ms"
     )
-    print(log_message)
     return response
 
 @app.get("/", summary="Root Endpoint", description="Menampilkan halaman index.html.")
@@ -44,141 +62,119 @@ async def root():
     html_path = "/root/ytnew/index.html"
     if os.path.exists(html_path):
         return FileResponse(html_path)
-    else:
-        return {"error": "index.html file not found"}
+    return JSONResponse(status_code=404, content={"error": "index.html file not found"})
 
-@app.get("/search/", summary="Pencarian Video YouTube", description="Mencari video YouTube berdasarkan kata kunci.")
+@app.get("/search/", summary="Pencarian Video YouTube")
 async def search_video(query: str = Query(..., description="Kata kunci pencarian untuk video YouTube")):
     try:
         ydl_opts = {'quiet': True, 'cookiefile': COOKIES_FILE}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             search_result = ydl.extract_info(f"ytsearch5:{query}", download=False)
-            videos = [{"title": v["title"], "url": v["webpage_url"], "id": v["id"]} for v in search_result['entries']]
-        print(f"Endpoint: search, Query: {query}, Status: Success")
+            videos = [
+                {"title": v["title"], "url": v["webpage_url"], "id": v["id"]}
+                for v in search_result.get('entries', [])
+                if 'title' in v and 'webpage_url' in v and 'id' in v
+            ]
+        logger.info(f"search | Query: {query} | Results: {len(videos)}")
         return {"results": videos}
     except Exception as e:
-        print(f"Endpoint: search, Query: {query}, Error: {str(e)}")
+        logger.error(f"search | Query: {query} | Error: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.get("/info/", summary="Informasi Video YouTube", description="Mendapatkan informasi tentang video YouTube berdasarkan URL.")
+@app.get("/info/", summary="Informasi Video YouTube")
 async def get_info(url: str = Query(..., description="URL video YouTube")):
     try:
         ydl_opts = {'quiet': True, 'cookiefile': COOKIES_FILE}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+
         formats = info.get('formats', [])
         resolutions = []
         for fmt in formats:
-            if fmt.get('vcodec') != 'none':
-                resolution = f"{fmt['height']}p" if fmt.get('height') else "Unknown"
+            if fmt.get('vcodec') != 'none' and fmt.get('height'):
                 resolutions.append({
-                    "resolution": resolution,
+                    "resolution": f"{fmt['height']}p",
                     "ext": fmt.get('ext', 'Unknown'),
                     "size": fmt.get('filesize_approx', 'Unknown')
                 })
-        print(f"Endpoint: info, URL: {url}, Resolutions: {resolutions}")
+
+        unique_resolutions = list({v['resolution']: v for v in resolutions}.values())
+
         return {
-            "title": info['title'],
-            "duration": info['duration'],
+            "title": info.get('title'),
+            "duration": info.get('duration'),
             "views": info.get('view_count', 'N/A'),
-            "resolutions": resolutions,
+            "resolutions": unique_resolutions,
             "thumbnail": info.get('thumbnail'),
         }
     except Exception as e:
-        print(f"Endpoint: info, URL: {url}, Error: {str(e)}")
+        logger.error(f"info | URL: {url} | Error: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.get("/download/", summary="Unduhan Video YouTube", description="Mengunduh video YouTube.")
+@app.get("/download/", summary="Unduhan Video YouTube")
 async def download_video(
-    url: str = Query(..., description="URL video YouTube"),
-    resolution: int = Query(720, description="Resolusi video yang diinginkan (misalnya, 720, 1080)"),
-    mode: str = Query("url", description="Mode unduhan: 'url' atau 'buffer'")
+    background_tasks: BackgroundTasks,
+    url: str = Query(...),
+    resolution: int = Query(720),
+    mode: str = Query("url")
 ):
+
+    if mode not in ["url", "buffer"]:
+        return JSONResponse(status_code=400, content={"error": "Mode unduhan tidak valid. Gunakan 'url' atau 'buffer'."})
+
     try:
-        ydl_opts_info = {'quiet': True, 'cookiefile': COOKIES_FILE}
-        with yt_dlp.YoutubeDL(ydl_opts_info) as ydl_info:
-            info = ydl_info.extract_info(url, download=False)
-        
-        sanitized_title = "".join(c if c.isalnum() or c in [' ', '.', '_'] else "_" for c in info['title'])
-        file_name = f"{sanitized_title}.mp4"
-        final_path = os.path.join(OUTPUT_DIR, file_name)
-
-        video_path = os.path.join(OUTPUT_DIR, "video.mp4")
-        audio_path = os.path.join(OUTPUT_DIR, "audio.m4a")
-
-        ydl_opts_video = {
-            'format': f'bestvideo[height={resolution}]',
-            'outtmpl': video_path
-        }
-        ydl_opts_audio = {
-            'format': 'bestaudio',
-            'outtmpl': audio_path
+        ydl_opts = {
+            'format': f'bestvideo[height<={resolution}][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'outtmpl': os.path.join(OUTPUT_DIR, '%(title)s_%(resolution)sp.%(ext)s'),
+            'cookiefile': COOKIES_FILE,
+            'merge_output_format': 'mp4'
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts_video) as video_ydl:
-            video_ydl.download([url])
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            file_path = ydl.prepare_filename(info)
 
-        with yt_dlp.YoutubeDL(ydl_opts_audio) as audio_ydl:
-            audio_ydl.download([url])
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File tidak ditemukan setelah unduhan: {file_path}")
 
-        subprocess.run([
-            'ffmpeg', '-y', '-i', video_path, '-i', audio_path,
-            '-c:v', 'copy', '-c:a', 'aac', '-strict', 'experimental',
-            final_path
-        ], check=True)
-
-        os.remove(video_path)
-        os.remove(audio_path)
+        background_tasks.add_task(delete_file_after_delay, file_path)
 
         if mode == "url":
             return {
                 "title": info['title'],
-                "thumbnail": info['thumbnail'],
-                "resolution": resolution,
-                "filesize": os.path.getsize(final_path),
-                "author": "nauval",
-                "download_url": f"https://ytdlpyton.nvlgroup.my.id/download/file/{quote(file_name)}"
+                "thumbnail": info.get("thumbnail"),
+                "download_url": f"https://ytdlpyton.nvlgroup.my.id/download/file/{quote(os.path.basename(file_path))}"
             }
-        elif mode == "buffer":
-            with open(final_path, "rb") as f:
-                video_buffer = io.BytesIO(f.read())
-            return StreamingResponse(video_buffer, media_type="video/mp4", headers={"Content-Disposition": f"attachment; filename={file_name}"})
-        else:
-            return JSONResponse(status_code=400, content={"error": "Invalid download mode. Use 'url' or 'buffer'."})
 
+        with open(file_path, "rb") as f:
+            video_buffer = io.BytesIO(f.read())
+
+        return StreamingResponse(
+            video_buffer,
+            media_type="video/mp4",
+            headers={"Content-Disposition": f"attachment; filename={os.path.basename(file_path)}"}
+        )
+
+    except yt_dlp.utils.DownloadError as e:
+        logger.error(f"download | URL: {url} | yt_dlp Error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
     except Exception as e:
+        logger.error(f"download | URL: {url} | General Error: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.get("/download/file/{filename}", summary="Unduhan File Video", description="Mengunduh file video dari server.")
-async def download_file(filename: str):
-    file_path = os.path.join(OUTPUT_DIR, filename)
-    if os.path.exists(file_path):
-        return FileResponse(file_path, media_type="video/mp4", filename=unquote(filename))
-    else:
-        return JSONResponse(status_code=404, content={"error": "File not found"})
 
-@app.get("/spotify/download/", summary="Unduhan Lagu Spotify", description="Mengunduh lagu dari Spotify.")
-async def spotify_download(url: str = Query(..., description="URL lagu Spotify")):
-    try:
-        subprocess.run(['spotdl', 'download', url, '--output', SPOTIFY_OUTPUT_DIR], check=True)
-        file_name = os.listdir(SPOTIFY_OUTPUT_DIR)[0]
-        file_path = os.path.join(SPOTIFY_OUTPUT_DIR, file_name)
-        download_url = f"https://ytdlpyton.nvlgroup.my.id/download/file/{quote(file_name)}"
-        return {"download_url": download_url}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-from fastapi import BackgroundTasks
-
-@app.get("/download/audio/", summary="Unduhan Audio YouTube", description="Mengunduh audio dari video YouTube.")
+@app.get("/download/audio/", summary="Unduhan Audio YouTube")
 async def download_audio(
-    url: str = Query(..., description="URL video YouTube"),
-    mode: str = Query("url", description="Mode unduhan: 'url' atau 'buffer'"),
-    background_tasks: BackgroundTasks = BackgroundTasks
+    background_tasks: BackgroundTasks,
+    url: str = Query(...),
+    mode: str = Query("url")
 ):
+    if mode not in ["url", "buffer"]:
+        return JSONResponse(status_code=400, content={"error": "Mode unduhan tidak valid. Gunakan 'url' atau 'buffer'."})
+
     try:
         ydl_opts = {
-            'outtmpl': os.path.join(OUTPUT_DIR, '%(title)s_downloadbynauval.%(ext)s'),
+            'outtmpl': os.path.join(OUTPUT_DIR, '%(title)s_audio_downloadbynauval.%(ext)s'),
             'format': 'bestaudio/best',
             'cookiefile': COOKIES_FILE,
             'postprocessors': [{
@@ -186,34 +182,51 @@ async def download_audio(
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
+            'noplaylist': True,
         }
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            output_filename = f"{info['title']}_downloadbynauval.mp3"
-            file_path = os.path.join(OUTPUT_DIR, output_filename)
+
+        output_filename = f"{info['title']}_audio_downloadbynauval.mp3"
+        file_path = os.path.join(OUTPUT_DIR, output_filename)
 
         if not os.path.exists(file_path):
             raise FileNotFoundError("File hasil konversi tidak ditemukan.")
 
-        asyncio.create_task(delete_file_after_delay(file_path))
+        background_tasks.add_task(delete_file_after_delay, file_path)
 
         if mode == "url":
             return {
                 "title": info['title'],
-                "thumbnail": info['thumbnail'],
+                "thumbnail": info.get('thumbnail'),
                 "filesize": os.path.getsize(file_path),
                 "author": "nauval",
-                "download_url": f"https://ytdlpyton.nvlgroup.my.id/download/file/{quote(output_filename)}"
+                "download_url": f"https://ytdlpyton.nvlgroup.my.id/download/file/{quote(os.path.basename(output_filename))}"
             }
-        elif mode == "buffer":
-            with open(file_path, "rb") as f:
-                audio_buffer = io.BytesIO(f.read())
-            return StreamingResponse(audio_buffer, media_type="audio/mp3", headers={"Content-Disposition": f"attachment; filename={output_filename}"})
-        else:
-            return JSONResponse(status_code=400, content={"error": "Invalid download mode. Use 'url' or 'buffer'."})
 
-    except Exception as e:
-        import traceback
-        print(f"Endpoint: download/audio, URL: {url}, Error: {traceback.format_exc()}")
+        with open(file_path, "rb") as f:
+            audio_buffer = io.BytesIO(f.read())
+
+        return StreamingResponse(
+            audio_buffer,
+            media_type="audio/mp3",
+            headers={"Content-Disposition": f"attachment; filename={os.path.basename(output_filename)}"}
+        )
+
+    except yt_dlp.utils.DownloadError as e:
+        logger.error(f"menjadi/download/audio | URL: {url} | yt_dlp Error: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
+    except Exception as e:
+        logger.error(f"menjadi/download/audio | URL: {url} | General Error: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/download/file/{filename}", summary="Mengunduh file hasil")
+async def download_file(filename: str):
+    file_path = os.path.join(OUTPUT_DIR, filename)
+    if os.path.exists(file_path):
+        return FileResponse(file_path, filename=filename)
+    return JSONResponse(status_code=404, content={"error": "File tidak ditemukan"})
+                
           
