@@ -194,10 +194,6 @@ async def download_video(
     resolution: int = Query(720),
     mode: str = Query("url")
 ):
-
-    if mode not in ["url", "buffer"]:
-        return JSONResponse(status_code=400, content={"error": "Mode unduhan tidak valid. Gunakan 'url' atau 'buffer'."})
-
     try:
         ydl_opts = {
             'format': f'bestvideo[height<={resolution}][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
@@ -205,7 +201,6 @@ async def download_video(
             'cookiefile': COOKIES_FILE,
             'merge_output_format': 'mp4'
         }
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             file_path = ydl.prepare_filename(info)
@@ -214,13 +209,6 @@ async def download_video(
             raise FileNotFoundError(f"File tidak ditemukan setelah unduhan: {file_path}")
 
         background_tasks.add_task(delete_file_after_delay, file_path)
-
-        if mode == "url":
-            return {
-                "title": info['title'],
-                "thumbnail": info.get("thumbnail"),
-                "download_url": f"https://emiogiwara-cdn.hf.space/app/Apiytdlp/output/{quote(os.path.basename(file_path))}"
-            }
 
         with open(file_path, "rb") as f:
             video_buffer = io.BytesIO(f.read())
