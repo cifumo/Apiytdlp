@@ -219,7 +219,7 @@ async def download_video(
             return {
                 "title": info['title'],
                 "thumbnail": info.get("thumbnail"),
-                "download_url": f"https://ytdlpyton.nvlgroup.my.id/download/file/{quote(os.path.basename(file_path))}"
+                "download_url": f"https://emiogiwara-cdn.hf.space/app/Apiytdlp/output/{quote(os.path.basename(file_path))}"
             }
 
         with open(file_path, "rb") as f:
