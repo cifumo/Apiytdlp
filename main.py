@@ -217,7 +217,7 @@ async def download_video(
             video_buffer,
             media_type="video/mp4",
             headers={"Content-Disposition": f"attachment; filename={os.path.basename(file_path)}"}
-        )
+            )
 
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"download | URL: {url} | yt_dlp Error: {e}")
