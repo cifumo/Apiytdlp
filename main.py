@@ -84,7 +84,7 @@ async def log_requests(request: Request, call_next):
 
 @app.get("/", summary="Root Endpoint", description="Menampilkan halaman index.html.")
 async def root():
-    html_path = "/root/Apiytdlp/index.html"
+    html_path = "/app/Apiytdlp/index.html"
     if os.path.exists(html_path):
         return FileResponse(html_path)
     return JSONResponse(status_code=404, content={"error": "index.html file not found"})
